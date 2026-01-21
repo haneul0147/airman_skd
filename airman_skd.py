@@ -1,66 +1,73 @@
+# app.py
 import streamlit as st
 import pandas as pd
 import re
 from io import BytesIO
 from datetime import datetime
 
-st.set_page_config(page_title="스케줄 정렬 대시보드", layout="wide")
-st.title("📅 출/입국 스케줄 정렬 대시보드")
+st.set_page_config(page_title="스케줄 정렬 대시보드", layout="wide",initial_sidebar_state="collapsed")
+st.title("📅 출/입국 스케줄 정렬 ")
 
-# -----------------------------
-# 탭 생성
-tab1, tab2 = st.tabs(["✈️ 출국 스케줄", "🛬 입국 FX 스케줄"])
 
-# =============================
-# 출국 스케줄 (모든 편명)
-# =============================
+# ---------------------------
+# 1️⃣ 캐싱 함수
+# ---------------------------
+@st.cache_data
+def parse_schedule(text, io_type="출"):
+    schedule = []
+    current_worker = ""
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        # 근무자 이름
+        if re.match(r"^[가-힣]+$", line):
+            current_worker = line
+            continue
+        # 맨 앞 번호 제거
+        line = re.sub(r"^\d+\.\s*", "", line)
+        flight = re.search(r"[A-Za-z0-9]+", line)
+        people = re.search(r"(\d+)명", line)
+        io = re.search(r"(입|출)", line)
+        time_match = re.search(r"(\d{2}:\d{2})", line)
+        hotel = "SH" if "/sh" in line.lower() else "SIH"
+        time_val = time_match.group(1) if time_match else ""
+        if flight and io and io.group(1) == io_type:
+            schedule.append({
+                "근무자": current_worker,
+                "편명": flight.group(),
+                "인원": int(people.group(1)) if people else 1,
+                "시간": time_val,
+                "호텔": hotel
+            })
+    return pd.DataFrame(schedule)
+
+# ---------------------------
+# 2️⃣ 탭 구성
+# ---------------------------
+tab1, tab2 = st.tabs(["✈️ 공항서비스(출국) 스케줄", "🛬 FX 입국 스케줄"])
+
+# ---------------------------
+# 출국 스케줄
+# ---------------------------
 with tab1:
-    st.subheader("출국 스케줄 (공항서비스 전달용)")
+    st.subheader("출국 스케줄 (공항서비스팀 아웃바운드 공유)")
     text_out = st.text_area("출국 스케줄 텍스트 붙여넣기", height=250)
     file_out = st.file_uploader("또는 출국 스케줄 엑셀 업로드", type=["xlsx"], key="outbound")
 
     if st.button("📊 출국 스케줄 정렬 실행"):
-        schedule_out = []
-        current_worker_out = ""
-
         # 텍스트 처리
         if text_out.strip():
-            lines = text_out.splitlines()
-            for line in lines:
-                line = line.strip()
-                if not line:
-                    continue
-                if re.match(r"^[가-힣]+$", line):
-                    current_worker_out = line
-                    continue
-                line = re.sub(r"^\d+\.\s*", "", line)
-                flight = re.search(r"[A-Za-z0-9]+", line)
-                people = re.search(r"(\d+)명", line)
-                io = re.search(r"(입|출)", line)
-                hotel = "SH" if "/sh" in line.lower() else "SIH"
-                time_match = re.search(r"(\d{2}:\d{2})", line)
-                time_val = time_match.group(1) if time_match else ""
-                if flight and people and io and io.group(1) == "출":
-                    schedule_out.append({
-                        "근무자": current_worker_out,
-                        "편명": flight.group(),
-                        "인원": int(people.group(1)),
-                        "호텔": hotel,
-                        "시간": time_val
-                    })
-
-        # 엑셀 업로드 처리
-        if file_out:
+            df_out = parse_schedule(text_out, io_type="출")
+        elif file_out:
             df_out = pd.read_excel(file_out)
-            df_out = df_out[df_out["입/출국"] == "출"].copy()
+            df_out = df_out[df_out["입/출국"].str.lower() == "출"].copy()
             df_out['호텔'] = df_out['호텔'].replace("", "SIH")
-        elif schedule_out:
-            df_out = pd.DataFrame(schedule_out)
         else:
-            df_out = None
+            df_out = pd.DataFrame()
 
-        if df_out is not None and not df_out.empty:
-            # 같은 편명 + 시간 + 호텔 근무자 합치기
+        if not df_out.empty:
+            # 편명, 시간, 호텔 기준으로 그룹화
             df_grouped = (
                 df_out.groupby(["편명", "시간", "호텔"], as_index=False)
                 .agg({
@@ -68,7 +75,6 @@ with tab1:
                     "인원": "sum"
                 })
             )
-            # 시간 기준 정렬
             df_grouped['시간_dt'] = pd.to_datetime(df_grouped['시간'], format="%H:%M", errors='coerce')
             df_grouped = df_grouped.sort_values('시간_dt').drop(columns='시간_dt').reset_index(drop=True)
             df_grouped.index += 1
@@ -90,49 +96,28 @@ with tab1:
         else:
             st.info("텍스트를 붙여넣거나 엑셀을 업로드해 주세요.")
 
-# =============================
+# ---------------------------
 # 입국 FX 스케줄
-# =============================
+# ---------------------------
 with tab2:
-    st.subheader("입국 스케줄 (FX INBOUND 전달 용)")
+    st.subheader("입국 스케줄 (FX 인바운드 담당자공유)")
     text_in = st.text_area("입국 스케줄 텍스트 붙여넣기", height=250)
     file_in = st.file_uploader("또는 입국 스케줄 엑셀 업로드", type=["xlsx"], key="inbound")
 
-    if st.button("📊 입국 스케줄 정렬 실행"):
-        schedule_in = []
-        current_worker_in = ""
-
+    if st.button("📊 입국 FX 스케줄 정렬 실행"):
         # 텍스트 처리
         if text_in.strip():
-            lines = text_in.splitlines()
-            for line in lines:
-                line = line.strip()
-                if not line:
-                    continue
-                if re.match(r"^[가-힣]+$", line):
-                    current_worker_in = line
-                    continue
-                line = re.sub(r"^\d+\.\s*", "", line)
-                flight = re.search(r"[A-Za-z0-9]+", line)
-                io = re.search(r"(입|출)", line)
-                if flight and io and io.group(1) == "입" and "FX" in flight.group().upper():
-                    schedule_in.append({
-                        "근무자": current_worker_in,
-                        "편명": flight.group(),
-                        "시간": re.search(r"(\d{2}:\d{2})", line).group(1) 
-                                 if re.search(r"(\d{2}:\d{2})", line) else ""
-                    })
-
-        # 엑셀 업로드 처리
-        if file_in:
+            df_in = parse_schedule(text_in, io_type="입")
+            # FX만 필터링 (대소문자 무시)
+            df_in = df_in[df_in['편명'].str.upper().str.contains("FX")]
+        elif file_in:
             df_in = pd.read_excel(file_in)
-            df_in = df_in[(df_in["입/출국"].str.lower() == "입") & (df_in["편명"].str.upper().str.contains("FX"))][["편명", "근무자", "시간"]]
-        elif schedule_in:
-            df_in = pd.DataFrame(schedule_in)
+            df_in = df_in[(df_in["입/출국"].str.lower() == "입") & 
+                          (df_in["편명"].str.upper().str.contains("FX"))]
         else:
-            df_in = None
+            df_in = pd.DataFrame()
 
-        if df_in is not None and not df_in.empty:
+        if not df_in.empty:
             df_in['시간_dt'] = pd.to_datetime(df_in['시간'], format="%H:%M", errors='coerce')
             df_in = df_in.sort_values('시간_dt').drop(columns='시간_dt').reset_index(drop=True)
             df_in.index += 1
@@ -154,4 +139,25 @@ with tab2:
         else:
             st.info("텍스트를 붙여넣거나 엑셀을 업로드해 주세요.")
             
-    
+            
+st.markdown("""
+<style>
+
+/* 탭 버튼 */
+button[data-testid="stTab"] {
+    font-size: 55px !important;
+    padding: 20px 35px !important;
+}
+
+/* 모바일 */
+@media (max-width: 768px) {
+    button[data-testid="stTab"] {
+        font-size: 15px !important;
+        padding: 12px 14px !important;
+        white-space: normal !important;
+        text-align: center;
+    }
+}
+
+</style>
+""", unsafe_allow_html=True)
